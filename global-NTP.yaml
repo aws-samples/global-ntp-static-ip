@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS Global Accelerator with two NTP load balancers
+Parameters:
+
+  ARNLoadBalancerRegion1:
+    Type: String
+    Description: The ARN of the load balancer in the first region
+
+  ARNLoadBalancerRegion2:
+    Type: String
+    Description: The ARN of the load balancer in the second region
+
+  ARNLoadBalancerRegion3:
+    Type: String
+    Description: The ARN of the load balancer in the third region
+
+Resources:
+  # Global Accel is retained to avoid losing the IP addresses.
+  Accelerator:
+    Type: AWS::GlobalAccelerator::Accelerator
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${AWS::StackName}-NTPGlobalAccelerator
+      Enabled: true
+      IpAddressType: IPV4
+
+  Listener:
+    Type: AWS::GlobalAccelerator::Listener
+    Properties:
+      AcceleratorArn: !Ref Accelerator
+      PortRanges:
+        - FromPort: 123
+          ToPort: 123
+      Protocol: UDP
+
+  EndpointGroupRegion1:
+    Type: AWS::GlobalAccelerator::EndpointGroup
+    Properties:
+      ListenerArn: !Ref Listener
+      EndpointGroupRegion: !Select 
+                            - 3
+                            - !Split 
+                              - ':'
+                              - !Ref ARNLoadBalancerRegion1
+      TrafficDialPercentage: 100
+      HealthCheckPort: 4460
+      HealthCheckProtocol: TCP
+      EndpointConfigurations:
+        - EndpointId: !Ref ARNLoadBalancerRegion1
+          Weight: 100
+          ClientIPPreservationEnabled: true
+
+  EndpointGroupRegion2:
+    Type: AWS::GlobalAccelerator::EndpointGroup  
+    Properties:
+      ListenerArn: !Ref Listener
+      EndpointGroupRegion: !Select 
+                            - 3
+                            - !Split 
+                              - ':'
+                              - !Ref ARNLoadBalancerRegion2
+      TrafficDialPercentage: 100 
+      HealthCheckPort: 4460
+      HealthCheckProtocol: TCP
+      EndpointConfigurations:
+        - EndpointId: !Ref ARNLoadBalancerRegion2
+          Weight: 100
+          ClientIPPreservationEnabled: true
+
+  EndpointGroupRegion3:
+    Type: AWS::GlobalAccelerator::EndpointGroup  
+    Properties:
+      ListenerArn: !Ref Listener
+      EndpointGroupRegion: !Select 
+                            - 3
+                            - !Split 
+                              - ':'
+                              - !Ref ARNLoadBalancerRegion3
+      TrafficDialPercentage: 100 
+      HealthCheckPort: 4460
+      HealthCheckProtocol: TCP
+      EndpointConfigurations:
+        - EndpointId: !Ref ARNLoadBalancerRegion3
+          Weight: 100
+          ClientIPPreservationEnabled: true
+
+Outputs:
+
+  AcceleratorDNSName:
+    Description: The DNS name of the accelerator
+    Value: !GetAtt Accelerator.DnsName
+  AcceleratorIPs:
+    Description: The IP addresses assigned to the accelerator
+    Value: !Join [', ', !GetAtt Accelerator.Ipv4Addresses]

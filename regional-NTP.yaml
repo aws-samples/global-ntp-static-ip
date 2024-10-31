@@ -1,0 +1,439 @@
+# CloudFormation template deploys a VPC with subnets in 2 AZs, and EC2 instances in those AZs, from t4g instance family, running NTP, and placed behind a load balancer.
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploys a Highly available NTP solution in AWS
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: The CIDR block for the VPC.
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: The CIDR block for the public subnet in AZ1.
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: The CIDR block for the public subnet in AZ2.
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: The CIDR block for the private subnet in AZ1.
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: The CIDR block for the private subnet in AZ2.
+  AllowedAccessCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: The CIDR block to allow access to the load balancer.
+    MinLength: "9"
+    MaxLength: "18"
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    Description: The EC2 instance type.
+    AllowedValues:
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+      - t4g.xlarge
+      - t4g.2xlarge
+      - t4g.4xlarge
+      - t4g.8xlarge
+      - t4g.16xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.
+  NtpServer:
+    Type: String
+    Default: 169.254.169.123
+    Description: The NTP server to use. Defaults to Amazon Time Sync Service
+    AllowedPattern: ^[a-zA-Z0-9._-]+$
+    ConstraintDescription: Must be a valid NTP server.
+    MaxLength: 255
+    MinLength: 1
+  InstanceCount:
+    Type: Number
+    Default: 2
+    Description: The number of instances to deploy.
+    MinValue: 1
+    MaxValue: 6
+    ConstraintDescription: Must be a valid number of instances.
+  AMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Latest Amazon Linux 2023 AMI ID
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+
+  
+  #IAM role for EC2 instances to use for Session Manager
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet1
+
+  PublicSubnet2: 
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable1: 
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable1
+
+  PrivateRouteTable2: 
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable2
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+  
+  # A security group to be used exclusively in the SSM Endpoint interface, with a self-referencing rule
+  SSMSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSM Endpoint traffic
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-SSMSecurityGroup
+  SSMSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SSMSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref SSMSecurityGroup
+      Description: Self-referencing rule for SSM Endpoint traffic
+  SSMSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SSMSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref SSMSecurityGroup
+      Description: Self-referencing rule for SSM Endpoint traffic
+
+
+  # The SSM Endpoints needed to get a session opened in a private subnet
+  VPCSSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcId: !Ref Vpc
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SSMSecurityGroup
+      PrivateDnsEnabled: true
+      VpcEndpointType: Interface
+  
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcId: !Ref Vpc
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SSMSecurityGroup
+      PrivateDnsEnabled: true
+      VpcEndpointType: Interface
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow NTP Traffic from NLB.
+      VpcId: !Ref Vpc
+      # Allow all outbound explictly
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic - NLB
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 123
+          ToPort: 123
+          SourceSecurityGroupId: !Ref NLBSecurityGroup
+          Description: Allow NTP traffic from NLB
+        - IpProtocol: tcp
+          FromPort: 4460
+          ToPort: 4460
+          SourceSecurityGroupId: !Ref NLBSecurityGroup
+          Description: Allow Health Check traffic from NLB
+
+  IamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-${AWS::Region}-IamInstanceProfile
+      Path: "/"
+      Roles:
+      - !Ref EC2Role
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-LaunchTemplate
+      LaunchTemplateData:
+        ImageId: !Ref AMI
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+          - !Ref SSMSecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt
+            - IamInstanceProfile
+            - Arn
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "server ${NtpServer} prefer iburst minpoll 4 maxpoll 4" >> /etc/chrony.conf
+            
+            # Enabling NTS purely for Health Check purposes, port TCP 4460 will not be externally exposed.
+            KEY=/etc/pki/tls/private/server.key
+            CERT=/etc/pki/tls/certs/server.crt
+            IP=127.0.0.1
+            openssl req \
+                -newkey rsa:2048 \
+                -x509 \
+                -nodes \
+                -keyout /etc/pki/tls/private/server.key \
+                -new \
+                -out /etc/pki/tls/certs/server.crt \
+                -subj /CN=127.0.0.1 \
+                -reqexts SAN \
+                -extensions SAN \
+                -config <(cat /etc/pki/tls/openssl.cnf \
+                    <(printf '[SAN]\nsubjectAltName=IP:127.0.0.1')) \
+                -sha256 \
+                -days 7300
+            chmod u=rw,g=,o= $KEY
+            chmod u=rw,g=rw,o=r $CERT
+            chown chrony:chrony $KEY $CERT
+            echo "ntsserverkey $KEY" >> /etc/chrony.conf
+            echo "ntsservercert $CERT" >> /etc/chrony.conf
+            echo "ratelimit interval 3 burst 8 leak 2" >> /etc/chrony.conf
+            echo "allow ${AllowedAccessCidr}" >> /etc/chrony.conf
+            echo "clientloglimit 134217728" >> /etc/chrony.conf
+            systemctl enable chronyd.service
+            systemctl restart chronyd.service
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-Instance
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-AutoScalingGroup
+      DesiredCapacity: !Ref InstanceCount
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MaxSize: !Ref InstanceCount
+      MinSize: !Ref InstanceCount
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs: 
+        - !Ref NTPTargetGroup
+  
+  #Target Group for NLB service NTP  
+  NTPTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 123
+      Protocol: UDP
+      VpcId: !Ref Vpc
+      TargetType: instance
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: 4460
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-TargetGroup
+  
+  #NLB Security Group
+  NLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access to NLB
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic - NLB
+        - IpProtocol: udp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic - NLB
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 123
+          ToPort: 123
+          CidrIp: !Ref AllowedAccessCidr
+          Description: Allow NTP traffic from anywhere
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-NLBSecurityGroup
+
+  #NLB pointing to Target Group
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      SecurityGroups:
+        - !Ref NLBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-LoadBalancer
+  
+  #Listener for NLB NTP 123
+  ListenerNTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref NTPTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 123
+      Protocol: UDP
+  
+Outputs:
+  LoadBalancerARN:
+    Value: !Ref LoadBalancer
+    Description: The ARN of the load balancer.
+    
